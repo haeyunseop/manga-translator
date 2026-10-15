@@ -49,6 +49,34 @@ def test_text_does_not_silently_overflow():
     with pytest.raises(RuntimeError,match='들어가지 않습니다'):
         typeset(make_demo(),regions,['너무 긴 문장 '*10000,'테스트'])
 
+def test_small_narrow_balloon_fits_with_adaptive_padding():
+    from backend.vision import Region
+    image=Image.new('RGB',(140,220),'white')
+    region=Region('テスト',90,(20,20,55,160),[],'vertical')
+    rendered=typeset(image,[region],['세상을 바꾸겠어.'])
+    assert rendered.size==image.size
+    changed=np.any(np.array(rendered)!=np.array(image),axis=2)
+    assert changed[20:160,20:55].any()
+    changed[20:160,20:55]=False
+    assert not changed.any()
+
+def test_overflow_preserves_all_text_in_numbered_page_notes(monkeypatch):
+    from backend.vision import Region
+    from PIL import ImageDraw
+    image=Image.new('RGB',(300,220),'white')
+    region=Region('テスト',90,(20,20,40,50),[],'vertical')
+    text='이 작은 영역에 들어가지 않는 번역도 마지막 문장까지 모두 표시합니다.'
+    drawn=[]
+    original=ImageDraw.ImageDraw.text
+    def record(self,xy,text,*args,**kwargs):
+        drawn.append(text)
+        return original(self,xy,text,*args,**kwargs)
+    monkeypatch.setattr(ImageDraw.ImageDraw,'text',record)
+    rendered=typeset(image,[region],[text])
+    assert rendered.width==image.width and rendered.height>image.height
+    assert ''.join(drawn).replace(' ','').endswith(('1. '+text).replace(' ',''))
+    assert np.array_equal(np.array(rendered)[:220,50:],np.array(image)[:,50:])
+
 @pytest.mark.real_model
 def test_real_japanese_to_korean_pipeline(tmp_path):
     if not translator.ready(): pytest.skip('Real local model weights not installed; this is not a translation pass.')

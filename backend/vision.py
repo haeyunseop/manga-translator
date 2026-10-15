@@ -186,23 +186,50 @@ def _wrap(text,font,width):
 def typeset(image,regions,translations):
     result=image.copy()
     draw=ImageDraw.Draw(result)
+    overflow=[]
     for region,text in zip(regions,translations,strict=True):
         if len(text)>1200:
             raise RuntimeError('번역문이 말풍선에 들어가지 않습니다. 페이지를 나눠 주세요.')
         x1,y1,x2,y2=region.box
-        width,height=x2-x1-20,y2-y1-20
+        padding=max(2,min(10,int(min(x2-x1,y2-y1)*.08)))
+        width,height=x2-x1-2*padding,y2-y1-2*padding
         selected=None
-        for size in range(min(48,int(height*.7)),11,-1):
+        for size in range(min(48,int(height*.7)),7,-1):
             font=ImageFont.truetype(FONT_PATH,size,index=1 if str(FONT_PATH).lower().endswith('.ttc') else 0)
             lines=_wrap(text,font,width)
-            step=size*1.45
-            if lines and len(lines)*step<=height:
+            step=size*1.3
+            if lines and len(lines)*step<=height and all(font.getlength(line)<=width for line in lines):
                 selected=(font,lines,step); break
         if selected is None:
-            raise RuntimeError('번역문이 말풍선에 들어가지 않습니다. OCR 결과와 이미지를 확인하세요.')
+            # Preserve the complete translation instead of clipping it or failing
+            # the whole page when OCR returns a narrow column or a tiny region.
+            overflow.append(text)
+            draw.rectangle((x1,y1,x2-1,y2-1),outline='#97521d',width=1)
+            marker=ImageFont.truetype(FONT_PATH,10,index=1 if str(FONT_PATH).lower().endswith('.ttc') else 0)
+            label=str(len(overflow))
+            if width>=marker.getlength(label) and height>=13:
+                draw.text(((x1+x2)/2,(y1+y2)/2),label,font=marker,fill='#97521d',anchor='mm')
+            continue
         font,lines,step=selected
         cy=(y1+y2)/2-len(lines)*step/2
         for line in lines:
             draw.text(((x1+x2)/2,cy),line,font=font,fill='#171717',anchor='mt',stroke_width=0)
             cy+=step
+    if overflow:
+        size=max(12,min(22,image.width//35))
+        font=ImageFont.truetype(FONT_PATH,size,index=1 if str(FONT_PATH).lower().endswith('.ttc') else 0)
+        step=round(size*1.5)
+        lines=_wrap('공간이 부족한 영역의 번역 (위 그림의 번호 순서)',font,image.width-24)
+        for number,text in enumerate(overflow,1):
+            lines.append('')
+            lines.extend(_wrap(f'{number}. {text}',font,image.width-24))
+        height=image.height+24+len(lines)*step
+        if height*image.width>MAX_PIXELS*2:
+            raise RuntimeError('번역문을 표시할 공간이 너무 큽니다. OCR 결과를 확인하거나 페이지를 나눠 주세요.')
+        combined=Image.new('RGB',(image.width,height),'#fffaf0')
+        combined.paste(result,(0,0))
+        notes=ImageDraw.Draw(combined)
+        for i,line in enumerate(lines):
+            notes.text((12,image.height+12+i*step),line,font=font,fill='#171717',anchor='lt')
+        result=combined
     return result
