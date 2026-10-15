@@ -31,6 +31,12 @@ function Assert-PortsFree {
         }
     }
 }
+function Need-VCRuntime {
+    if (-not (Test-Path (Join-Path $env:WINDIR 'System32\vcruntime140.dll'))) {
+        & winget install --exact --id 'Microsoft.VCRedist.2015+.x64' --source winget --accept-source-agreements --accept-package-agreements
+        Check-Exit 'Install official Microsoft C++ runtime'
+    }
+}
 Refresh-Path
 if ($Action -eq 'setup') {
     Need-Tool 'py' 'Python.Python.3.12'
@@ -65,8 +71,9 @@ if ($Action -eq 'setup') {
     # Remove inherited access to the local credential file. Does not print its contents.
     & icacls.exe (Join-Path $Root '.env') /inheritance:r /grant:r "$($env:USERDOMAIN)\$($env:USERNAME):(F)" | Out-Null
     Check-Exit 'Restrict credential-file permissions'
+    Need-VCRuntime
     & $Python scripts/download_models.py
-    Check-Exit 'Download and verify official OCR/translation models'
+    Check-Exit 'Download and verify local OCR/translation models'
     Push-Location frontend
     try {
         & npm.cmd ci; Check-Exit 'Install web dependencies'
@@ -79,12 +86,19 @@ if ($Action -eq 'setup') {
     # Refuse to rebuild a running instance. This also prevents port collisions
     # that could leave an older Python process serving a newer web interface.
     Assert-PortsFree
+    & $Python scripts/init_env.py
+    Check-Exit 'Check private settings encoding'
+    Need-VCRuntime
+    & $Python scripts/download_quality.py
+    Check-Exit 'Download and verify local quality models'
     Push-Location frontend
     try {
         if (-not (Test-Path node_modules)) { throw 'Web dependencies are missing. Run setup-windows.bat first.' }
         & npm.cmd run build; Check-Exit 'Update web interface'
     } finally { Pop-Location }
-    Write-Host 'Update complete. Run start-windows.bat. Existing password, models and pages were preserved.'
+    & $Python scripts/activate_quality.py
+    Check-Exit 'Activate local quality models'
+    Write-Host 'Update complete. Run start-windows.bat. Existing password and pages were preserved. MangaOCR and Qwen3 4B are now selected.'
 } elseif ($Action -eq 'start') {
     if (-not (Test-Path $Python)) { throw 'Run setup-windows.bat first.' }
     Assert-PortsFree
@@ -109,8 +123,11 @@ if ($Action -eq 'setup') {
         Write-Host 'Keep this window open while reading. Press Ctrl+C here to stop MangaTrans.'
         while (-not $Api.HasExited -and -not $Web.HasExited) { Start-Sleep -Seconds 1 }
     } finally {
-        if ($Api -and -not $Api.HasExited) { Stop-Process -Id $Api.Id -ErrorAction SilentlyContinue }
-        if ($Web -and -not $Web.HasExited) { Stop-Process -Id $Web.Id -ErrorAction SilentlyContinue }
+        # The API now owns a bounded llama.cpp subprocess. Stop only our process
+        # trees so inference cannot keep running after the application closes.
+        if ($Api -and -not $Api.HasExited) { Start-Process -FilePath (Join-Path $env:WINDIR 'System32\taskkill.exe') -ArgumentList @('/PID',[string]$Api.Id,'/T','/F') -NoNewWindow -Wait -ErrorAction SilentlyContinue }
+        if ($Web -and -not $Web.HasExited) { Start-Process -FilePath (Join-Path $env:WINDIR 'System32\taskkill.exe') -ArgumentList @('/PID',[string]$Web.Id,'/T','/F') -NoNewWindow -Wait -ErrorAction SilentlyContinue }
+        if ($Api) { & $Python scripts/cleanup_quality_cache.py ([string]$Api.Id) }
     }
 } else {
     if (-not (Test-Path '.env')) { throw 'Run setup-windows.bat first.' }

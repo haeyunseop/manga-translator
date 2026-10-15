@@ -17,7 +17,7 @@ def login(client):
     return r
 
 def test_auth_protects_jobs_health_and_images(client):
-    for url in ['/api/jobs','/api/health','/api/jobs/'+'a'*32+'/pages/0/original']:
+    for url in ['/api/jobs','/api/health','/api/jobs/'+'a'*32+'/pages/0/original','/api/jobs/'+'a'*32+'/diagnostics']:
         assert client.get(url).status_code==401
     assert client.post('/api/jobs/demo').status_code==401
 
@@ -60,3 +60,24 @@ def test_restart_marks_inflight_jobs_as_interrupted():
     store.initialize()
     recovered=store.get(job['id'])
     assert recovered['status']=='error' and '재시작' in recovered['error']
+
+def test_diagnostics_exports_only_selected_job_and_images(client):
+    import json,zipfile
+    from backend.config import DATA
+    login(client)
+    job=worker.new_job('upload','auto')
+    job.update(status='done',total=1,completed=1,pages=[{'index':0,'status':'ready','texts':[]}])
+    folder=DATA/job['id'];folder.mkdir()
+    Image.new('RGB',(100,100),'white').save(folder/'0-original.png')
+    (folder/'.env').write_text('must-not-export=this-file')
+    store.save(job)
+    response=client.get(f'/api/jobs/{job["id"]}/diagnostics')
+    assert response.status_code==200 and response.headers['content-type']=='application/zip'
+    with zipfile.ZipFile(io.BytesIO(response.content)) as bundle:
+        assert set(bundle.namelist())=={'diagnostics.json','page-1-original.png'}
+        report=json.loads(bundle.read('diagnostics.json'))
+        assert report['job']['id']==job['id']
+        assert 'MANGATRANS_PASSWORD' not in bundle.read('diagnostics.json').decode()
+    assert not list(DATA.glob('diagnostics-*'))
+    job['status']='running';store.save(job)
+    assert client.get(f'/api/jobs/{job["id"]}/diagnostics').status_code==409

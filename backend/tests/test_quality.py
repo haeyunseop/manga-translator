@@ -52,3 +52,15 @@ def test_typeset_skips_untrusted_translation_without_changing_original():
     image=make_quality_demo()
     region=Region('日本語',95,(40,40,200,340),[],'vertical')
     assert np.array_equal(np.array(typeset(image,[region],[None])),np.array(image))
+
+def test_manga_cleanup_removes_ruby_outside_legacy_token_boxes():
+    from backend.vision import clean_image
+    image=Image.new('RGB',(160,160),'white');draw=ImageDraw.Draw(image)
+    draw.rectangle((60,65,80,90),fill='black')
+    draw.rectangle((105,45,109,52),fill='black')  # ruby omitted by Tesseract
+    draw.rectangle((10,10,25,25),fill='black')   # artwork outside balloon
+    region=Region('日本語',90,(35,30,135,140),[(60,65,81,91)],'vertical',[(35,30),(134,30),(134,139),(35,139)],'manga-ocr')
+    cleaned,mask=clean_image(image,[region])
+    assert np.array(cleaned)[45:53,105:110].mean()>230
+    assert np.array(mask)[45:53,105:110].all()
+    assert np.array_equal(np.array(cleaned)[10:26,10:26],np.array(image)[10:26,10:26])

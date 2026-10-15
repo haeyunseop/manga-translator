@@ -79,6 +79,12 @@ test('real two-page upload, rendering and original switching',async({page})=>{
   for(const image of await images.all())await expect(image).toHaveAttribute('src',/\/original$/);
   await page.getByRole('button',{name:'한국어',exact:true}).click();
   for(const image of await images.all())await expect(image).toHaveAttribute('src',/\/translated$/);
+  const diagnosticDownload=page.waitForEvent('download');
+  await page.getByRole('button',{name:'진단 파일 저장',exact:true}).click();
+  const diagnostic=await diagnosticDownload;
+  expect(diagnostic.suggestedFilename()).toMatch(/^MangaTrans-diagnostics-[a-f0-9]{8}\.zip$/);
+  await diagnostic.saveAs('../artifacts/browser-diagnostics.zip');
+  expect(await diagnostic.failure()).toBeNull();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBe(true);
   await page.screenshot({path:'../artifacts/mobile-multiple.png',fullPage:true});
  }finally{

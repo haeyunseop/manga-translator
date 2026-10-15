@@ -5,7 +5,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
-from .config import DATA, MAX_TOTAL_BYTES
+from .config import DATA, MAX_TOTAL_BYTES, MODEL_KIND, OCR_KIND
 from . import store
 from .demo import make_demo
 from .sources import fetch_public, resolve_source
@@ -21,7 +21,7 @@ def reserve():
 
 def new_job(source,direction):
     ident=uuid.uuid4().hex
-    return {'id':ident,'title':'나의 만화','source':source,'direction':direction,'created':time.time(),'status':'queued','stage':'대기 중','completed':0,'total':0,'pages':[],'error':None}
+    return {'id':ident,'title':'나의 만화','source':source,'direction':direction,'engines':{'ocr':OCR_KIND,'translation':MODEL_KIND},'created':time.time(),'status':'queued','stage':'대기 중','completed':0,'total':0,'pages':[],'error':None}
 
 def submit(job,images=None,url=None,demo=False):
     try:
@@ -73,7 +73,11 @@ def run(job,url,demo):
             warnings=[]
             for n,r in enumerate(regions):
                 job['stage']=f'{i+1}페이지 · 번역 {n+1}/{len(regions)}'; store.save(job)
-                if r.confidence<55:
+                if r.ocr_warning:
+                    translated.append(None)
+                    warnings.append(f'{n+1}번 영역: {r.ocr_warning}')
+                    continue
+                if r.ocr_engine=='tesseract' and r.confidence<55:
                     translated.append(None)
                     warnings.append(f'{n+1}번 영역: OCR 신뢰도가 낮아({r.confidence}%) 원문을 유지했습니다. 글 방향과 인식 텍스트를 확인하세요.')
                     continue

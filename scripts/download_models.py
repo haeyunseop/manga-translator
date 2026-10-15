@@ -13,7 +13,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 os.environ.setdefault('HF_HOME',str(ROOT/'models/.hf-cache'))
 os.environ.setdefault('HF_HUB_DISABLE_XET','1')
-from backend.config import MODELS, MODEL_ID, MODEL_PATH, MODEL_KIND
+from backend.config import MODELS, MODEL_ID, MODEL_PATH, MODEL_KIND, OCR_KIND
 from huggingface_hub import HfApi, hf_hub_download
 
 def digest(path):
@@ -67,7 +67,16 @@ def download_translation():
 if __name__=='__main__':
     try:
         download_ocr()
-        if '--ocr-only' not in sys.argv: download_translation()
+        if '--ocr-only' not in sys.argv:
+            if OCR_KIND=='manga':
+                from download_quality import download_manga
+                download_manga()
+            if MODEL_KIND=='qwen':
+                from download_quality import download_quantized,download_runtime
+                download_quantized()
+                download_runtime()
+            else:
+                download_translation()
     except Exception as exc:
         # Hub errors can contain temporary signed CDN URLs. Do not dump them in logs.
         print(f'Download failed ({type(exc).__name__}). Check access to huggingface.co and us.aws.cdn.hf.co, free disk space, and official artifact checksums. No paid fallback was used.',file=sys.stderr)

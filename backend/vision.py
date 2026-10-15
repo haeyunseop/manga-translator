@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import pytesseract
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-from .config import MAX_PIXELS, MODELS, MODEL_PATH, MODEL_KIND, FONT_PATH
+from .config import MAX_PIXELS, MODELS, MODEL_PATH, MODEL_KIND, FONT_PATH, OCR_KIND
 
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 JP = re.compile(r'[\u3040-\u30ff\u3400-\u9fff]')
@@ -37,6 +37,8 @@ class Region:
     ink_boxes: list
     direction: str
     polygon: list | None = None
+    ocr_engine: str = 'tesseract'
+    ocr_warning: str | None = None
 
 class TranslationQualityError(RuntimeError):
     """An output that must not replace the original text."""
@@ -144,6 +146,14 @@ def recognize(image, direction='auto'):
             results.append(Region(text,round(sum(float(data['conf'][i]) for i in indices)/len(indices),1),box,boxes,orient))
     if not results:
         raise RuntimeError('일본어를 인식하지 못했습니다. 선명한 이미지나 다른 글 방향으로 다시 시도하세요.')
+    if OCR_KIND=='manga':
+        from .manga_ocr import manga_reader
+        for region in results:
+            region.ocr_engine='manga-ocr'
+            try:
+                region.text=manga_reader.read(image,region)
+            except ValueError as exc:
+                region.ocr_warning=str(exc)
     # Japanese reading order: upper row first, right to left within a row.
     return sorted(results,key=lambda r:(r.box[1]//120,-r.box[0]))
 
@@ -154,6 +164,9 @@ class LocalTranslator:
         self.lock=threading.Lock()
 
     def ready(self):
+        if MODEL_KIND=='qwen':
+            from .llama_translate import ready
+            return ready()
         needed=['config.json','sentencepiece.bpe.model','tokenizer_config.json']
         if MODEL_KIND=='m2m100': needed.append('vocab.json')
         return all((MODEL_PATH/f).is_file() for f in needed) and any((MODEL_PATH/f).is_file() for f in ['pytorch_model.bin','model.safetensors'])
@@ -161,6 +174,13 @@ class LocalTranslator:
     def translate(self,text):
         if not self.ready():
             raise RuntimeError('로컬 번역 모델이 없습니다. python scripts/download_models.py로 내려받으세요. 유료 API로 대체하지 않습니다.')
+        if MODEL_KIND=='qwen':
+            from .llama_translate import translate
+            try:
+                with self.lock:
+                    return validate_translation(text,translate(text))
+            except ValueError as exc:
+                raise TranslationQualityError(str(exc)) from None
         with self.lock:
             import torch
             from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
@@ -196,6 +216,12 @@ def clean_image(image,regions):
             x1,y1=max(0,x1-2),max(0,y1-2)
             x2,y2=min(image.width,x2+2),min(image.height,y2+2)
             region_mask[y1:y2,x1:x2]=(gray[y1:y2,x1:x2]<210).astype('uint8')*255
+        if r.ocr_engine=='manga-ocr' and r.polygon:
+            # The neural reader transcribes the whole balloon. Clear punctuation
+            # and ruby that Tesseract omitted, not just its high-confidence boxes.
+            interior=np.zeros_like(mask)
+            cv2.fillPoly(interior,[np.array(r.polygon,dtype=np.int32)],255)
+            region_mask[(interior>0)&(gray<210)]=255
         region_mask=cv2.dilate(region_mask,np.ones((3,3),np.uint8),iterations=1)
         if r.polygon:
             boundary=np.zeros_like(mask)

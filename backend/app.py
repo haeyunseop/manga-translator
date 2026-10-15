@@ -5,6 +5,9 @@ import re
 import shutil
 import threading
 import time
+import json
+import tempfile
+import zipfile
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,7 +16,8 @@ from fastapi import FastAPI, Request, HTTPException, UploadFile, File, Form, Dep
 from fastapi.responses import FileResponse, JSONResponse
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from pydantic import BaseModel, Field
-from .config import DATA, MODELS, MAX_PAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES, FONT_PATH, MODEL_KIND
+from starlette.background import BackgroundTask
+from .config import DATA, MODELS, MAX_PAGES, MAX_IMAGE_BYTES, MAX_TOTAL_BYTES, FONT_PATH, MODEL_KIND, OCR_KIND
 from . import store, worker
 from .vision import normalize_image, translator
 from .sources import allowed_hosts
@@ -93,7 +97,13 @@ def me(): return {'authenticated':True}
 @app.get('/api/health',dependencies=[Depends(authenticated)])
 def health():
     import shutil
-    return {'ocr':bool(shutil.which('tesseract')) and all((MODELS/f'tessdata/{lang}.traineddata').exists() for lang in ['jpn','jpn_vert']), 'translation':translator.ready(),'font':Path(FONT_PATH).is_file(),'engine':f'Tesseract · {"NLLB 600M" if MODEL_KIND=="nllb" else "M2M100 418M"} · OpenCV','supported_hosts':sorted(allowed_hosts())}
+    ocr=bool(shutil.which('tesseract')) and all((MODELS/f'tessdata/{lang}.traineddata').exists() for lang in ['jpn','jpn_vert'])
+    if OCR_KIND=='manga':
+        from .manga_ocr import manga_reader
+        ocr=ocr and manga_reader.ready()
+    name={'nllb':'NLLB 600M','m2m100':'M2M100 418M','qwen':'Qwen3 4B Q4_K_M'}[MODEL_KIND]
+    license_name={'nllb':'CC-BY-NC-4.0','m2m100':'MIT','qwen':'Apache-2.0'}[MODEL_KIND]
+    return {'ocr':ocr,'translation':translator.ready(),'font':Path(FONT_PATH).is_file(),'engine':f'{"MangaOCR + Tesseract" if OCR_KIND=="manga" else "Tesseract"} · {name} · OpenCV','model_license':license_name,'supported_hosts':sorted(allowed_hosts())}
 
 @app.get('/api/jobs',dependencies=[Depends(authenticated)])
 def jobs(): return store.recent()
@@ -172,3 +182,27 @@ def delete_job(ident:str):
     shutil.rmtree(DATA/ident,ignore_errors=False)
     with store.connect() as db: db.execute('DELETE FROM jobs WHERE id=?',(ident,))
     return {'ok':True}
+
+@app.get('/api/jobs/{ident}/diagnostics',dependencies=[Depends(authenticated)])
+def diagnostics(ident:str):
+    job=checked_job(ident)
+    if job['status'] in ('queued','running'):
+        raise HTTPException(409,'처리가 끝난 작업의 진단 파일을 저장할 수 있습니다.')
+    files=[];size=0
+    for index in range(min(job['total'],MAX_PAGES)):
+        for variant in ('original','translated'):
+            path=DATA/ident/f'{index}-{variant}.png'
+            if path.is_file():
+                size+=path.stat().st_size
+                if size>200*1024*1024: raise HTTPException(413,'진단 파일이 너무 큽니다. 문제가 있는 페이지만 새 작업으로 올려 주세요.')
+                files.append((path,f'page-{index+1}-{variant}.png'))
+    folder=Path(tempfile.mkdtemp(prefix='diagnostics-',dir=DATA))
+    archive=folder/'diagnostics.zip'
+    try:
+        with zipfile.ZipFile(archive,'w',compression=zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr('diagnostics.json',json.dumps({'job':job,'current_settings':{'ocr':OCR_KIND,'translation':MODEL_KIND},'notice':'Contains only this job and its page images. Current settings may differ from the engines used by older jobs.'},ensure_ascii=False,indent=2))
+            for path,name in files: bundle.write(path,name)
+    except Exception:
+        shutil.rmtree(folder)
+        raise
+    return FileResponse(archive,media_type='application/zip',filename=f'MangaTrans-diagnostics-{ident[:8]}.zip',background=BackgroundTask(shutil.rmtree,folder))
