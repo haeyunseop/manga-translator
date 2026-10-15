@@ -35,6 +35,10 @@
 
 도우미는 PowerShell 실행 정책을 해당 프로세스에서만 설정하며, 시스템의 영구 실행 정책이나 TLS/패키지 체크섬 검증을 해제하지 않는다. Windows 설치나 Tailscale 계정 로그인은 사용자의 PC에서 직접 완료해야 한다. 이 채팅의 “환경 게시”가 스마트폰용 사이트를 인터넷에 배포해 주지는 않는다.
 
+### Windows에서 일본어 OCR 데이터 경로 오류
+
+`Error opening data file "C:\\...\\tessdata"/jpn.traineddata`처럼 경로의 따옴표가 그대로 표시되면 이전 OCR 호출 코드의 Windows 경로 전달 문제다. 최신 `backend/vision.py`를 기존 폴더의 같은 파일에 덮어쓰고 실행 창을 종료한 뒤 `start-windows.bat`로 다시 실행한다. 수정본은 `TESSDATA_PREFIX` 환경 변수로 경로를 전달한다. 기존 데이터 파일이 있다면 모델 다운로드나 비밀번호 설정을 반복할 필요가 없다.
+
 ### 기존 Windows 설정 인코딩 오류
 
 이전 도우미는 Windows 기본 CP949로 `.env`를 저장해 한글 비밀번호에서 `UnicodeDecodeError: utf-8 ... byte 0xc0` 오류가 날 수 있었다. 수정된 `scripts/init_env.py`는 새 설정을 UTF-8로 저장하고, 기존의 정상적인 CP949 설정은 값을 바꾸지 않고 UTF-8로 복구한다. 기존 파일의 접근 권한을 유지하며 비밀번호를 출력하거나 다시 정하지 않는다. 알 수 없는 인코딩이나 불완전한 파일은 덮어쓰지 않는다.

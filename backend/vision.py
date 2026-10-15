@@ -38,7 +38,10 @@ class Region:
     direction: str
 
 def tess_config(psm):
-    return f'--tessdata-dir "{MODELS / "tessdata"}" --psm {psm}'
+    # pytesseract uses shlex(posix=False) on Windows, preserving literal quotes
+    # in --tessdata-dir. The child environment passes this path without quoting.
+    os.environ['TESSDATA_PREFIX']=str(MODELS / 'tessdata')
+    return f'--psm {psm}'
 
 def _read_region(image, box, direction, psm, isolation=None):
     crop=image.crop(box)

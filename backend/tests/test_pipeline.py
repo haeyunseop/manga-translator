@@ -4,6 +4,24 @@ from PIL import Image
 from backend.demo import make_demo
 from backend.vision import recognize,clean_image,typeset,translator
 
+def test_actual_ocr_with_spaces_and_korean_in_data_path(tmp_path,monkeypatch):
+    import os
+    import shlex
+    import shutil
+    from backend import vision
+    original=vision.MODELS/'tessdata/jpn.traineddata'
+    models=tmp_path/'한글 모델 folder'
+    (models/'tessdata').mkdir(parents=True)
+    shutil.copyfile(original,models/'tessdata/jpn.traineddata')
+    monkeypatch.setattr(vision,'MODELS',models)
+    monkeypatch.setenv('TESSDATA_PREFIX','incorrect-existing-path')
+    config=vision.tess_config(6)
+    # Both pytesseract parsers pass identical arguments, without path quotes.
+    assert shlex.split(config,posix=False)==shlex.split(config,posix=True)==['--psm','6']
+    assert os.environ['TESSDATA_PREFIX']==str(models/'tessdata')
+    regions=recognize(make_demo(),'horizontal')
+    assert [r.text for r in regions]==['こんにちは。','ありがとう。']
+
 def test_actual_japanese_ocr_and_art_preserving_cleanup():
     image=make_demo()
     regions=recognize(image,'horizontal')
