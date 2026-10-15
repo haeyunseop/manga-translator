@@ -1,0 +1,15 @@
+.venv/
+.env
+.env.*
+!.env.example
+data/
+models/
+__pycache__/
+.pytest_cache/
+frontend/node_modules/
+frontend/.next/
+frontend/next-env.d.ts
+frontend/tsconfig.tsbuildinfo
+artifacts/
+*.log
+.cache/
