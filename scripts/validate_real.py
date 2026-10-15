@@ -26,7 +26,7 @@ def main():
     cleaned.save(out/'demo-cleaned.png');mask.save(out/'demo-mask.png')
     typeset(cleaned,regions,translations).save(out/'demo-translated.png')
     report={'engine':f'real local {MODEL_ID}','stub':False,'seconds':round(time.monotonic()-start,2),'texts':[{'source':r.text,'translation':t,'ocr_confidence':r.confidence} for r,t in zip(regions,translations,strict=True)]}
-    (out/'real-validation.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+    (out/'real-validation.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print(f'Full page saved. Elapsed: {report["seconds"]}s',flush=True)
 
 if __name__=='__main__': main()

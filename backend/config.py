@@ -4,7 +4,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parents[1]
-load_dotenv(ROOT / '.env', override=False, interpolate=False)
+load_dotenv(ROOT / '.env', override=False, interpolate=False,encoding='utf-8-sig')
 DATA = Path(os.environ.get('MANGATRANS_DATA', ROOT / 'data'))
 MODELS = Path(os.environ.get('MANGATRANS_MODELS', ROOT / 'models'))
 DATA.mkdir(parents=True, exist_ok=True)

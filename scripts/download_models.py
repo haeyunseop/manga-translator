@@ -38,12 +38,12 @@ def download_ocr():
             raise RuntimeError(f'SHA-256 mismatch: {name}')
         temp.replace(folder/name)
         print(f'OCR ready: {name} ({checksum[:12]})')
-    (folder/'provenance.json').write_text(json.dumps({'repository':repo,'revision':sha,'sha256':{n:digest(folder/n) for n in ['jpn.traineddata','jpn_vert.traineddata']}},indent=2))
+    (folder/'provenance.json').write_text(json.dumps({'repository':repo,'revision':sha,'sha256':{n:digest(folder/n) for n in ['jpn.traineddata','jpn_vert.traineddata']}},indent=2),encoding='utf-8')
 
 def download_translation():
     MODEL_PATH.mkdir(parents=True,exist_ok=True)
     provenance=MODEL_PATH/'provenance.json'
-    previous=json.loads(provenance.read_text()) if provenance.exists() else None
+    previous=json.loads(provenance.read_text(encoding='utf-8')) if provenance.exists() else None
     api=HfApi()
     info=api.model_info(MODEL_ID,revision=previous['revision'] if previous else 'main',files_metadata=True)
     keep={'config.json','generation_config.json','vocab.json','sentencepiece.bpe.model','tokenizer_config.json','special_tokens_map.json','pytorch_model.bin','tokenizer.json','README.md'}
@@ -61,7 +61,7 @@ def download_translation():
     if MODEL_KIND=='m2m100': required.add('vocab.json')
     if not required.issubset(hashes):
         raise RuntimeError('Required official model artifacts are missing.')
-    provenance.write_text(json.dumps({'model':MODEL_ID,'revision':info.sha,'license':getattr(info.card_data,'license',None),'sha256':hashes},indent=2))
+    provenance.write_text(json.dumps({'model':MODEL_ID,'revision':info.sha,'license':getattr(info.card_data,'license',None),'sha256':hashes},indent=2),encoding='utf-8')
     print('Translation model ready; subsequent inference uses local files only.')
 
 if __name__=='__main__':
