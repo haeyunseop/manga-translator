@@ -1,5 +1,5 @@
 # Native Windows helper. Not executed on the Linux development machine.
-param([ValidateSet('setup','start','phone')][string]$Action='start')
+param([ValidateSet('setup','start','phone','update')][string]$Action='start')
 $ErrorActionPreference='Stop'
 $Root=Split-Path -Parent $PSScriptRoot
 Set-Location $Root
@@ -22,6 +22,13 @@ function Need-Tool([string]$Command,[string]$Package) {
         & winget install --exact --id $Package --source winget --accept-source-agreements --accept-package-agreements
         Check-Exit "Install $Package"
         Refresh-Path
+    }
+}
+function Assert-PortsFree {
+    foreach ($Port in @(3000,8000)) {
+        if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+            throw 'MangaTrans ports are already in use. Stop its running window with Ctrl+C before updating or starting again.'
+        }
     }
 }
 Refresh-Path
@@ -66,8 +73,21 @@ if ($Action -eq 'setup') {
         & npm.cmd run build; Check-Exit 'Build web interface'
     } finally { Pop-Location }
     Write-Host 'Setup complete. Your chosen password is used on the login page.'
+} elseif ($Action -eq 'update') {
+    if (-not (Test-Path $Python)) { throw 'Run setup-windows.bat first.' }
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw 'Node.js is missing. Run setup-windows.bat first.' }
+    # Refuse to rebuild a running instance. This also prevents port collisions
+    # that could leave an older Python process serving a newer web interface.
+    Assert-PortsFree
+    Push-Location frontend
+    try {
+        if (-not (Test-Path node_modules)) { throw 'Web dependencies are missing. Run setup-windows.bat first.' }
+        & npm.cmd run build; Check-Exit 'Update web interface'
+    } finally { Pop-Location }
+    Write-Host 'Update complete. Run start-windows.bat. Existing password, models and pages were preserved.'
 } elseif ($Action -eq 'start') {
     if (-not (Test-Path $Python)) { throw 'Run setup-windows.bat first.' }
+    Assert-PortsFree
     $Api=$null; $Web=$null
     try {
         $Api=Start-Process -FilePath $Python -ArgumentList @('-m','uvicorn','backend.app:app','--host','127.0.0.1','--port','8000') -WorkingDirectory $Root -NoNewWindow -PassThru

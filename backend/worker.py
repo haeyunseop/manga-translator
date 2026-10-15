@@ -9,7 +9,7 @@ from .config import DATA, MAX_TOTAL_BYTES
 from . import store
 from .demo import make_demo
 from .sources import fetch_public, resolve_source
-from .vision import recognize, translator, clean_image, typeset, normalize_image
+from .vision import recognize, translator, clean_image, typeset, normalize_image, TranslationQualityError
 
 pool=ThreadPoolExecutor(max_workers=1,thread_name_prefix='mangatrans')
 slots=threading.BoundedSemaphore(3)
@@ -70,20 +70,32 @@ def run(job,url,demo):
                 image=im.convert('RGB')
             regions=recognize(image,job['direction'])
             translated=[]
+            warnings=[]
             for n,r in enumerate(regions):
                 job['stage']=f'{i+1}페이지 · 번역 {n+1}/{len(regions)}'; store.save(job)
-                translated.append(translator.translate(r.text))
+                if r.confidence<55:
+                    translated.append(None)
+                    warnings.append(f'{n+1}번 영역: OCR 신뢰도가 낮아({r.confidence}%) 원문을 유지했습니다. 글 방향과 인식 텍스트를 확인하세요.')
+                    continue
+                try:
+                    translated.append(translator.translate(r.text))
+                except TranslationQualityError as exc:
+                    translated.append(None)
+                    warnings.append(f'{n+1}번 영역: {exc}')
             job['stage']=f'{i+1}페이지 · 원문 제거 및 배경 복원'; store.save(job)
-            cleaned,mask=clean_image(image,regions)
+            cleaned,mask=clean_image(image,[r for r,t in zip(regions,translated,strict=True) if t is not None])
             job['stage']=f'{i+1}페이지 · 한국어 식자'; store.save(job)
             rendered=typeset(cleaned,regions,translated)
+            if rendered.height>image.height:
+                warnings.append('말풍선 안에 배치하기 어려운 번역은 이미지 아래에 번호 순서로 표시했습니다.')
             # Rename atomically: never serve an incompletely written output.
             rendered.save(directory/f'{i}-translated.part',format='PNG')
             (directory/f'{i}-translated.part').replace(directory/f'{i}-translated.png')
-            page.update(status='ready',texts=[{**asdict(r),'translation':t} for r,t in zip(regions,translated,strict=True)])
+            page.update(status='ready',warnings=warnings,texts=[{**asdict(r),'translation':t or '', 'review':t is None} for r,t in zip(regions,translated,strict=True)])
             job['completed']+=1
             store.save(job)
-        job.update(status='done',stage='번역 완료')
+        needs_review=any(p.get('warnings') for p in job['pages'])
+        job.update(status='done',stage='처리 완료 · 확인 필요한 영역 있음' if needs_review else '번역 완료')
     except Exception as exc:
         log.exception('Job %s failed',job['id'])
         message=str(exc) if isinstance(exc,(ValueError,RuntimeError)) else '페이지 처리에 실패했습니다. 서버 로그와 설치 상태를 확인하세요.'

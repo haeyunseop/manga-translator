@@ -36,6 +36,22 @@ class Region:
     box: tuple
     ink_boxes: list
     direction: str
+    polygon: list | None = None
+
+class TranslationQualityError(RuntimeError):
+    """An output that must not replace the original text."""
+
+def validate_translation(source,result):
+    if not result or (JP.search(source) and not re.search(r'[가-힣]',result)):
+        raise TranslationQualityError('한국어 번역을 확인하지 못해 원문을 유지했습니다.')
+    compact=re.sub(r'[\s\W_]+','',result)
+    words=re.findall(r'[가-힣]+',result)
+    # Detect short loops even if a model alternates punctuation or spacing.
+    repeating=any(re.search(r'(.{1,'+str(n)+r'})\1{5,}',compact) for n in (1,2,4,8))
+    repeated_word=any(words.count(word)>=6 and words.count(word)>len(words)*.4 for word in set(words))
+    if repeating or repeated_word or len(compact)>max(100,len(source)*4):
+        raise TranslationQualityError('번역 모델의 반복·과도한 출력을 감지해 원문을 유지했습니다.')
+    return result
 
 def tess_config(psm):
     # pytesseract uses shlex(posix=False) on Windows, preserving literal quotes
@@ -49,6 +65,10 @@ def _read_region(image, box, direction, psm, isolation=None):
         pixels=np.array(crop)
         pixels[isolation==0]=255
         crop=Image.fromarray(pixels)
+    # Small print and ruby are otherwise close to Tesseract's minimum glyph size.
+    scale=2 if max(crop.size)<900 else 1
+    if scale>1:
+        crop=crop.resize((crop.width*scale,crop.height*scale),Image.Resampling.LANCZOS)
     lang='jpn_vert' if direction=='vertical' else 'jpn'
     data=pytesseract.image_to_data(crop,lang=lang,config=tess_config(psm),output_type=pytesseract.Output.DICT,timeout=90)
     words=[]
@@ -62,8 +82,14 @@ def _read_region(image, box, direction, psm, isolation=None):
     ink=[]
     for i,_,_ in words:
         x,y,w,h=(int(data[k][i]) for k in ['left','top','width','height'])
-        ink.append((box[0]+x,box[1]+y,box[0]+x+w,box[1]+y+h))
-    return Region(text,round(sum(c for _,_,c in words)/len(words),1),box,ink,direction)
+        ink.append((box[0]+x//scale,box[1]+y//scale,box[0]+int(np.ceil((x+w)/scale)),box[1]+int(np.ceil((y+h)/scale))))
+    polygon=None
+    if isolation is not None:
+        contours,_=cv2.findContours(isolation,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            boundary=cv2.approxPolyDP(max(contours,key=cv2.contourArea),1.5,True).reshape(-1,2)
+            polygon=[(box[0]+int(x),box[1]+int(y)) for x,y in boundary]
+    return Region(text,round(sum(c for _,_,c in words)/len(words),1),box,ink,direction,polygon)
 
 def recognize(image, direction='auto'):
     if not (MODELS/'tessdata/jpn.traineddata').exists():
@@ -95,7 +121,12 @@ def recognize(image, direction='auto'):
                 r=None
             if r: choices.append(r)
         if choices:
-            results.append(max(choices,key=lambda r: r.confidence))
+            def score(r):
+                ix1=min(b[0] for b in r.ink_boxes);iy1=min(b[1] for b in r.ink_boxes)
+                ix2=max(b[2] for b in r.ink_boxes);iy2=max(b[3] for b in r.ink_boxes)
+                preferred='vertical' if iy2-iy1>(ix2-ix1)*1.2 else 'horizontal'
+                return r.confidence+(12 if r.direction==preferred else 0)
+            results.append(max(choices,key=score))
     if not results:
         # Fallback for borderless text. Group each Tesseract block independently.
         orient='vertical' if direction=='vertical' else 'horizontal'
@@ -142,17 +173,13 @@ class LocalTranslator:
                 raise RuntimeError('말풍선 텍스트가 모델 입력 한도를 초과했습니다. 이미지를 나눠 주세요.')
             with torch.inference_mode():
                 target=self.tokenizer.convert_tokens_to_ids('kor_Hang') if MODEL_KIND=='nllb' else self.tokenizer.get_lang_id('ko')
-                generated=self.model.generate(**encoded,forced_bos_token_id=target,max_new_tokens=256,max_length=None,num_beams=4)
+                generated=self.model.generate(**encoded,forced_bos_token_id=target,max_new_tokens=min(256,max(48,len(text)*4)),max_length=None,num_beams=4,no_repeat_ngram_size=4,repetition_penalty=1.1)
             eos=self.model.generation_config.eos_token_id
             end_tokens=eos if isinstance(eos,list) else [eos]
             if generated[0,-1].item() not in end_tokens:
-                raise RuntimeError('번역이 길이 한도에서 중단되었습니다. 이미지를 나눠 주세요.')
+                raise TranslationQualityError('번역이 길이 한도에서 중단돼 원문을 유지했습니다.')
             result=self.tokenizer.batch_decode(generated,skip_special_tokens=True)[0].strip()
-            if not result:
-                raise RuntimeError('모델이 빈 번역을 반환했습니다.')
-            if JP.search(text) and not re.search(r'[가-힣]',result):
-                raise RuntimeError('모델의 출력에서 한국어를 확인하지 못했습니다. 원문 인식 결과를 확인하세요.')
-            return result
+            return validate_translation(text,result)
 
 translator=LocalTranslator()
 
@@ -161,60 +188,138 @@ def clean_image(image,regions):
     gray=cv2.cvtColor(pixels,cv2.COLOR_RGB2GRAY)
     mask=np.zeros(gray.shape,dtype=np.uint8)
     for r in regions:
+        region_mask=np.zeros(gray.shape,dtype=np.uint8)
         # Include gaps between OCR words: low-confidence glyphs can be omitted by TSV.
         # Mask all ink inside the recognized text envelope, not only accepted word boxes.
         envelope=(min(b[0] for b in r.ink_boxes),min(b[1] for b in r.ink_boxes),max(b[2] for b in r.ink_boxes),max(b[3] for b in r.ink_boxes))
         for x1,y1,x2,y2 in [envelope]:
             x1,y1=max(0,x1-2),max(0,y1-2)
             x2,y2=min(image.width,x2+2),min(image.height,y2+2)
-            mask[y1:y2,x1:x2]=np.maximum(mask[y1:y2,x1:x2],(gray[y1:y2,x1:x2]<210).astype('uint8')*255)
-    mask=cv2.dilate(mask,np.ones((3,3),np.uint8),iterations=1)
+            region_mask[y1:y2,x1:x2]=(gray[y1:y2,x1:x2]<210).astype('uint8')*255
+        region_mask=cv2.dilate(region_mask,np.ones((3,3),np.uint8),iterations=1)
+        if r.polygon:
+            boundary=np.zeros_like(mask)
+            cv2.fillPoly(boundary,[np.array(r.polygon,dtype=np.int32)],255)
+            region_mask=cv2.bitwise_and(region_mask,boundary)
+        mask=cv2.bitwise_or(mask,region_mask)
     return Image.fromarray(cv2.inpaint(pixels,mask,3,cv2.INPAINT_TELEA)),Image.fromarray(mask)
 
 def _wrap(text,font,width):
     lines=[]
-    line=''
-    for char in text:
-        if char=='\n':
-            lines.append(line); line=''; continue
-        if font.getlength(line+char)>width and line:
-            lines.append(line.rstrip()); line=char.lstrip()
-        else: line+=char
-    if line: lines.append(line.rstrip())
+    for paragraph in text.split('\n'):
+        remaining=paragraph.strip()
+        if not remaining:
+            lines.append('')
+        while remaining:
+            line,rest=_take_line(remaining,font,width)
+            if not line:
+                # A single glyph wider than the available space is handled by
+                # the layout validator, never by silently dropping the glyph.
+                line,rest=remaining[0],remaining[1:]
+            lines.append(line)
+            remaining=rest
     return lines
+
+def _take_line(text,font,width):
+    text=text.lstrip()
+    low,high=0,len(text.split('\n',1)[0])
+    while low<high:
+        middle=(low+high+1)//2
+        if font.getlength(text[:middle])<=width:
+            low=middle
+        else:
+            high=middle-1
+    end=low
+    if end<len(text) and end and not text[end].isspace():
+        space=text.rfind(' ',0,end+1)
+        if space>0: end=space
+    return text[:end].rstrip(),text[end:].lstrip()
+
+def _region_mask(image,region,padding):
+    x1,y1,x2,y2=region.box
+    mask=np.ones((y2-y1,x2-x1),dtype=np.uint8)*255
+    if region.polygon:
+        mask[:]=0
+        points=np.array(region.polygon,dtype=np.int32)-[x1,y1]
+        cv2.fillPoly(mask,[points],255)
+    # Do not place Korean text over remaining line art, even for a fallback OCR
+    # block whose bounding rectangle is wider than the actual speech balloon.
+    pixels=np.array(image.crop(region.box).convert('RGB'))
+    mask[np.min(pixels,axis=2)<225]=0
+    return cv2.erode(mask,np.ones((padding*2+1,padding*2+1),np.uint8),borderType=cv2.BORDER_CONSTANT,borderValue=0)
+
+def _span(mask,y,height):
+    if y<0 or y+height>mask.shape[0]: return None
+    valid=np.all(mask[y:y+height]>0,axis=0).astype(np.int8)
+    edges=np.diff(np.pad(valid,(1,1)))
+    starts=np.flatnonzero(edges==1);ends=np.flatnonzero(edges==-1)
+    if not len(starts): return None
+    index=np.argmax(ends-starts)
+    return int(starts[index]),int(ends[index])
+
+def _balloon_text(mask,text,font):
+    width,height=mask.shape[1],mask.shape[0]
+    step=int(np.ceil(font.size*1.4))
+    for count in range(1,min(80,height//step)+1):
+        top=(height-count*step)//2
+        remaining=text.strip()
+        layout=[]
+        for row in range(count):
+            span=_span(mask,top+row*step,step)
+            if span is None: break
+            line,remaining=_take_line(remaining,font,span[1]-span[0])
+            if not line: break
+            layout.append((span,top+row*step,line))
+            if not remaining: break
+        if remaining: continue
+        overlay=Image.new('RGBA',(width,height))
+        draw=ImageDraw.Draw(overlay)
+        for (left,right),y,line in layout:
+            draw.text(((left+right)/2,y),line,font=font,fill='#171717',anchor='mt')
+        ink=np.array(overlay.getchannel('A'))>0
+        # Raster check accounts for glyph bearings as well as advance widths.
+        if ink.any() and not np.any(ink & (mask==0)):
+            return overlay
+    return None
 
 def typeset(image,regions,translations):
     result=image.copy()
     draw=ImageDraw.Draw(result)
     overflow=[]
     for region,text in zip(regions,translations,strict=True):
+        if text is None:
+            continue
         if len(text)>1200:
             raise RuntimeError('번역문이 말풍선에 들어가지 않습니다. 페이지를 나눠 주세요.')
         x1,y1,x2,y2=region.box
         padding=max(2,min(10,int(min(x2-x1,y2-y1)*.08)))
         width,height=x2-x1-2*padding,y2-y1-2*padding
+        mask=_region_mask(image,region,padding)
         selected=None
-        for size in range(min(48,int(height*.7)),7,-1):
+        # A wide balloon must not turn a short sentence into enormous type.
+        target=max(14,min(32,round(image.width/40)))
+        for size in range(target,max(10,round(target*.75))-1,-1):
             font=ImageFont.truetype(FONT_PATH,size,index=1 if str(FONT_PATH).lower().endswith('.ttc') else 0)
-            lines=_wrap(text,font,width)
-            step=size*1.3
-            if lines and len(lines)*step<=height and all(font.getlength(line)<=width for line in lines):
-                selected=(font,lines,step); break
+            selected=_balloon_text(mask,text,font)
+            if selected is not None: break
         if selected is None:
             # Preserve the complete translation instead of clipping it or failing
             # the whole page when OCR returns a narrow column or a tiny region.
             overflow.append(text)
-            draw.rectangle((x1,y1,x2-1,y2-1),outline='#97521d',width=1)
+            if region.polygon:
+                draw.line([tuple(p) for p in region.polygon]+[tuple(region.polygon[0])],fill='#97521d',width=1)
+            else:
+                draw.rectangle((x1,y1,x2-1,y2-1),outline='#97521d',width=1)
             marker=ImageFont.truetype(FONT_PATH,10,index=1 if str(FONT_PATH).lower().endswith('.ttc') else 0)
             label=str(len(overflow))
             if width>=marker.getlength(label) and height>=13:
-                draw.text(((x1+x2)/2,(y1+y2)/2),label,font=marker,fill='#97521d',anchor='mm')
+                label_image=Image.new('RGBA',(x2-x1,y2-y1))
+                ImageDraw.Draw(label_image).text(((x2-x1)/2,(y2-y1)/2),label,font=marker,fill='#97521d',anchor='mm')
+                ink=np.array(label_image.getchannel('A'))>0
+                if not np.any(ink & (mask==0)):
+                    result.paste(label_image,(x1,y1),label_image)
             continue
-        font,lines,step=selected
-        cy=(y1+y2)/2-len(lines)*step/2
-        for line in lines:
-            draw.text(((x1+x2)/2,cy),line,font=font,fill='#171717',anchor='mt',stroke_width=0)
-            cy+=step
+        result.paste(selected,(x1,y1),selected)
     if overflow:
         size=max(12,min(22,image.width//35))
         font=ImageFont.truetype(FONT_PATH,size,index=1 if str(FONT_PATH).lower().endswith('.ttc') else 0)
